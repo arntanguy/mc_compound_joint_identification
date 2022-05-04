@@ -1,6 +1,7 @@
 #pragma once
 
 #include <mc_control/fsm/State.h>
+#include <geos/geom/GeometryFactory.h>
 
 struct CompoundJointIdentification_Initial : mc_control::fsm::State
 {
@@ -12,10 +13,16 @@ struct CompoundJointIdentification_Initial : mc_control::fsm::State
 
 private:
   void readJoints(mc_control::fsm::Controller & ctl);
+  void computeConvexHull(const std::vector<std::array<double, 2>> & points);
 
 private:
   std::pair<std::string, std::string> joints_;
   // Joint index in refJointOrder
   std::pair<size_t, size_t> jIdx_;
-  std::vector<std::pair<double, double>> q_;
+  // Encoder measurements
+  std::vector<std::array<double, 2>> q_;
+  // Convex hull points
+  std::vector<std::array<double, 2>> hull_;
+
+  geos::geom::GeometryFactory::Ptr geom_factory;
 };

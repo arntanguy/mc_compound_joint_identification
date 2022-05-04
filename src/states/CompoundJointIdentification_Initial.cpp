@@ -1,5 +1,8 @@
 #include "CompoundJointIdentification_Initial.h"
 
+#include <geos/algorithm/ConvexHull.h>
+#include <geos/geom/CoordinateSequenceFactory.h>
+#include <geos/geom/Geometry.h>
 #include "../CompoundJointIdentification.h"
 
 void CompoundJointIdentification_Initial::start(mc_control::fsm::Controller & ctl_)
@@ -31,6 +34,7 @@ void CompoundJointIdentification_Initial::start(mc_control::fsm::Controller & ct
   check_joint(joints_.second);
   jIdx_ = {encoderIndex(joints_.first), encoderIndex(joints_.second)};
 
+  geom_factory = geos::geom::GeometryFactory::create();
   run(ctl);
 
   using Color = mc_rtc::gui::Color;
@@ -58,8 +62,9 @@ void CompoundJointIdentification_Initial::start(mc_control::fsm::Controller & ct
   ctl.gui()->addXYPlot(
       fmt::format("Compound joint {}/{}", joints_.first, joints_.second),
       mc_rtc::gui::plot::XY(
-          "Compound joint", [this]() { return q_.back().first; }, [this]() { return q_.back().second; }, Color::Blue),
-      mc_rtc::gui::plot::Polygon("Joint limits", [redSquareBlueFill]() { return redSquareBlueFill; })
+          "Encoder measurements", [this]() { return q_.back()[0]; }, [this]() { return q_.back()[1]; }, Color::Blue),
+      mc_rtc::gui::plot::Polygon("Joint limits", [redSquareBlueFill]() { return redSquareBlueFill; }),
+      mc_rtc::gui::plot::Polygon("Convex hull", [this]() { return PolygonDescription(hull_, Color::Magenta); })
 
   );
 
@@ -69,6 +74,7 @@ void CompoundJointIdentification_Initial::start(mc_control::fsm::Controller & ct
 bool CompoundJointIdentification_Initial::run(mc_control::fsm::Controller & ctl)
 {
   readJoints(ctl);
+  computeConvexHull(q_);
 
   return !output().empty();
 }
@@ -81,8 +87,30 @@ void CompoundJointIdentification_Initial::teardown(mc_control::fsm::Controller &
 void CompoundJointIdentification_Initial::readJoints(mc_control::fsm::Controller & ctl)
 {
   const auto & r = ctl.robot();
-  q_.emplace_back(r.encoderValues()[jIdx_.first], r.encoderValues()[jIdx_.second]);
-  mc_rtc::log::info("Value: {} / {}", q_.back().first, q_.back().second);
+  q_.push_back({r.encoderValues()[jIdx_.first], r.encoderValues()[jIdx_.second]});
+}
+
+void CompoundJointIdentification_Initial::computeConvexHull(const std::vector<std::array<double, 2>> & points)
+{
+  auto seq = geom_factory->getCoordinateSequenceFactory()->create(static_cast<size_t>(0), 0);
+  std::vector<geos::geom::Coordinate> seq_points;
+  for(const auto & p : points)
+  {
+    seq_points.push_back(geos::geom::Coordinate(p[0], p[1]));
+  }
+  seq_points.push_back(seq_points[0]);
+  seq->setPoints(seq_points);
+
+  auto geom_points = geom_factory->createMultiPoint(*seq);
+  auto geom_hull = geos::algorithm::ConvexHull(geom_points).getConvexHull();
+
+  auto hullseq = geom_hull->getCoordinates();
+  hull_.clear();
+  for(size_t i = 0; i < hullseq->size(); ++i)
+  {
+    hull_.push_back({hullseq->getX(i), hullseq->getY(i)});
+    mc_rtc::log::info("Hull {}: {}", i, hull_.back()[0], hull_.back()[1]);
+  }
 }
 
 EXPORT_SINGLE_STATE("CompoundJointIdentification_Initial", CompoundJointIdentification_Initial)
