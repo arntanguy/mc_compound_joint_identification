@@ -16,7 +16,8 @@ StatesFiles:
 - "@MC_STATES_RUNTIME_INSTALL_PREFIX@/data"
 # If true, state factory will be more verbose
 VerboseStateFactory: false
-constraints: []
+constraints:
+- type: compoundJoint
 collisions: []
 contacts: []
 

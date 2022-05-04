@@ -1,9 +1,11 @@
 #include "CompoundJointIdentification_Initial.h"
 
+#include <mc_rtc/io_utils.h>
 #include <geos/algorithm/ConvexHull.h>
 #include <geos/geom/CoordinateSequenceFactory.h>
 #include <geos/geom/Geometry.h>
 #include "../CompoundJointIdentification.h"
+#include <numeric>
 
 void CompoundJointIdentification_Initial::start(mc_control::fsm::Controller & ctl_)
 {
@@ -39,6 +41,7 @@ void CompoundJointIdentification_Initial::start(mc_control::fsm::Controller & ct
 
   using Color = mc_rtc::gui::Color;
   using PolygonDescription = mc_rtc::gui::plot::PolygonDescription;
+  using PlotStyle = mc_rtc::gui::plot::Style;
 
   auto get_joint_limits = [this, &ctl](const size_t jidx) -> std::pair<double, double> {
     const auto & jointLimits = ctl.robot().module().bounds();
@@ -64,30 +67,88 @@ void CompoundJointIdentification_Initial::start(mc_control::fsm::Controller & ct
       mc_rtc::gui::plot::XY(
           "Encoder measurements", [this]() { return q_.back()[0]; }, [this]() { return q_.back()[1]; }, Color::Blue),
       mc_rtc::gui::plot::Polygon("Joint limits", [redSquareBlueFill]() { return redSquareBlueFill; }),
-      mc_rtc::gui::plot::Polygon("Convex hull", [this]() { return PolygonDescription(hull_, Color::Magenta); })
+      mc_rtc::gui::plot::Polygon(
+          "Convex hull",
+          [this]() {
+            return PolygonDescription(hull_, Color::Magenta).style(PlotStyle::Dotted).fill(Color(1.0, 0.0, 0.0, 0.5));
+          }),
+      mc_rtc::gui::plot::Polygon("Compound Joint Polygon", [this]() -> PolygonDescription {
+        auto vertices = PointVector{};
+        if(!lines_.size()) return {};
+        vertices.push_back(lines_.front().first);
+        for(const auto & line : lines_)
+        {
+          vertices.push_back(line.second);
+        }
+        return PolygonDescription{vertices, Color::Green}.fill(Color(0.0, 1.0, 0.0, 0.5));
+      }));
 
-  );
-
-  ctl.gui()->addElement({}, mc_rtc::gui::Button("Done", [this]() { output("OK"); }));
+  ctl.gui()->addElement(
+      {},
+      mc_rtc::gui::NumberInput(
+          "Max regression error", [this]() { return maxError_; }, [this](double error) { maxError_ = error; }),
+      mc_rtc::gui::Label("Number of constraint lines", [this]() { return lines_.size(); }),
+      mc_rtc::gui::Button("Reset",
+                          [this]() {
+                            reset();
+                            output("");
+                          }),
+      mc_rtc::gui::Button("Done", [this]() {
+        printConstraint();
+        output("OK");
+      }));
 }
 
 bool CompoundJointIdentification_Initial::run(mc_control::fsm::Controller & ctl)
 {
-  readJoints(ctl);
-  computeConvexHull(q_);
+  if(iter_ == 0 || iter_ % iterRate_ == 0)
+  {
+    readJoints(ctl);
+    computeConvexHull(q_);
+    linearRegression(hull_);
+    printConstraint();
+    iter_ = 0;
+  }
 
+  ++iter_;
   return !output().empty();
 }
 
 void CompoundJointIdentification_Initial::teardown(mc_control::fsm::Controller & ctl_)
 {
   auto & ctl = static_cast<CompoundJointIdentification &>(ctl_);
+  printConstraint();
+}
+
+void CompoundJointIdentification_Initial::printConstraint()
+{
+  if(lines_.empty())
+  {
+    mc_rtc::log::error("No constraint lines found!");
+    return;
+  }
+
+  std::vector<std::string> constraintLine;
+  for(const auto & line : lines_)
+  {
+    constraintLine.push_back(fmt::format("{{ \"{}\", \"{}\", {{{}, {}}}, {{{}, {}}} }}", joints_.first, joints_.second,
+                                         line.first[0], line.first[1], line.second[0], line.second[1]));
+  }
+  mc_rtc::log::info("Compound Joint Constraint for joints {} / {} is:\n{{\n{}\n}}", joints_.first, joints_.second,
+                    mc_rtc::io::to_string(constraintLine, ",\n"));
 }
 
 void CompoundJointIdentification_Initial::readJoints(mc_control::fsm::Controller & ctl)
 {
   const auto & r = ctl.robot();
   q_.push_back({r.encoderValues()[jIdx_.first], r.encoderValues()[jIdx_.second]});
+}
+
+void CompoundJointIdentification_Initial::reset()
+{
+  hull_.clear();
+  q_.clear();
+  lines_.clear();
 }
 
 void CompoundJointIdentification_Initial::computeConvexHull(const std::vector<std::array<double, 2>> & points)
@@ -109,7 +170,67 @@ void CompoundJointIdentification_Initial::computeConvexHull(const std::vector<st
   for(size_t i = 0; i < hullseq->size(); ++i)
   {
     hull_.push_back({hullseq->getX(i), hullseq->getY(i)});
-    mc_rtc::log::info("Hull {}: {}", i, hull_.back()[0], hull_.back()[1]);
+    // mc_rtc::log::info("Hull {}: {}", i, hull_.back()[0], hull_.back()[1]);
+  }
+}
+
+// y = a * x + b
+// where a is the slope
+// b is the intercept
+template<typename T>
+std::tuple<T, T, T> GetLinearFit(const std::vector<T> & xData, const std::vector<T> & yData)
+{
+  const auto & x = xData;
+  const auto & y = yData;
+  const auto n = x.size();
+  const auto xSum = std::accumulate(x.begin(), x.end(), 0.0);
+  const auto ySum = std::accumulate(y.begin(), y.end(), 0.0);
+  const auto xxSum = std::inner_product(x.begin(), x.end(), x.begin(), 0.0);
+  const auto xySum = std::inner_product(x.begin(), x.end(), y.begin(), 0.0);
+
+  auto slope = (yData.size() * xySum - xSum * ySum) / (yData.size() * xxSum - xSum * xSum);
+  auto intercept = (ySum - slope * xSum) / yData.size();
+
+  // Compute error
+  size_t i = 0;
+  auto error = std::accumulate(xData.begin(), xData.end(), 0., [&slope, &yData, &intercept, &i](double acc, double x) {
+    return std::fabs((slope * x + intercept) - yData[i]);
+  });
+
+  return {slope, intercept, error};
+}
+
+void CompoundJointIdentification_Initial::linearRegression(const std::vector<std::array<double, 2>> & hull)
+{
+  lines_.clear();
+  // y = a * x + b
+
+  mc_rtc::log::warning("Fitting lines");
+  // Iteratively find lines fitting under a specified threshold
+  auto xData = std::vector<double>{};
+  auto yData = std::vector<double>{};
+  for(const auto & hPoint : hull_)
+  {
+    xData.push_back(hPoint[0]);
+    yData.push_back(hPoint[1]);
+    auto [slope, intercept, error] = GetLinearFit(xData, yData);
+    if(error >= maxError_)
+    {
+      lines_.push_back({// { xData.front(), slope * xData.front() + intercept},
+                        // { xData.back(), slope * xData.back() + intercept}
+                        {xData.front(), yData.front()},
+                        {xData.back(), yData.back()}});
+      mc_rtc::log::info("Linear fit: slope={:.2f} | intercept={:.2f} | error={:.2f}", slope, intercept, error);
+      xData.clear();
+      yData.clear();
+      xData.push_back(hPoint[0]);
+      yData.push_back(hPoint[1]);
+    }
+  }
+  if(lines_.size())
+  {
+    // Close the polygon
+    lines_.push_back({lines_.back().second, {hull.back()[0], hull.back()[1]}});
   }
 }
 
