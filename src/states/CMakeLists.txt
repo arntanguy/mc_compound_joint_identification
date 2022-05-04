@@ -1,0 +1,3 @@
+add_fsm_state_simple(CompoundJointIdentification_Initial)
+
+add_fsm_data_directory(data)
