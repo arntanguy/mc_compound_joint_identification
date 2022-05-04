@@ -1,6 +1,8 @@
 #include "CompoundJointIdentification.h"
 
-CompoundJointIdentification::CompoundJointIdentification(mc_rbdyn::RobotModulePtr rm, double dt, const mc_rtc::Configuration & config)
+CompoundJointIdentification::CompoundJointIdentification(mc_rbdyn::RobotModulePtr rm,
+                                                         double dt,
+                                                         const mc_rtc::Configuration & config)
 : mc_control::fsm::Controller(rm, dt, config)
 {
 
@@ -16,5 +18,3 @@ void CompoundJointIdentification::reset(const mc_control::ControllerResetData & 
 {
   mc_control::fsm::Controller::reset(reset_data);
 }
-
-
